@@ -579,14 +579,6 @@ mlir::Value CIRGenFunction::emitX86BuiltinExpr(unsigned builtinID,
   case X86::BI__builtin_ia32_alignq128:
   case X86::BI__builtin_ia32_alignq256:
   case X86::BI__builtin_ia32_alignq512:
-  case X86::BI__builtin_ia32_shuf_f32x4_256:
-  case X86::BI__builtin_ia32_shuf_f64x2_256:
-  case X86::BI__builtin_ia32_shuf_i32x4_256:
-  case X86::BI__builtin_ia32_shuf_i64x2_256:
-  case X86::BI__builtin_ia32_shuf_f32x4:
-  case X86::BI__builtin_ia32_shuf_f64x2:
-  case X86::BI__builtin_ia32_shuf_i32x4:
-  case X86::BI__builtin_ia32_shuf_i64x2:
   case X86::BI__builtin_ia32_vperm2f128_pd256:
   case X86::BI__builtin_ia32_vperm2f128_ps256:
   case X86::BI__builtin_ia32_vperm2f128_si256:
@@ -601,6 +593,49 @@ mlir::Value CIRGenFunction::emitX86BuiltinExpr(unsigned builtinID,
                  std::string("unimplemented X86 builtin call: ") +
                      getContext().BuiltinInfo.getName(builtinID));
     return {};
+  case X86::BI__builtin_ia32_shuf_f32x4:
+  case X86::BI__builtin_ia32_shuf_f64x2:
+  case X86::BI__builtin_ia32_shuf_i32x4:
+  case X86::BI__builtin_ia32_shuf_i64x2:
+  case X86::BI__builtin_ia32_shuf_f32x4_256:
+  case X86::BI__builtin_ia32_shuf_f64x2_256:
+  case X86::BI__builtin_ia32_shuf_i32x4_256:
+  case X86::BI__builtin_ia32_shuf_i64x2_256: {
+    mlir::Value src1 = ops[0];
+    mlir::Value src2 = ops[1];
+
+    unsigned imm =
+        ops[2].getDefiningOp<cir::ConstantOp>().getIntValue().getZExtValue();
+
+    unsigned numElems = cast<cir::VectorType>(src1.getType()).getSize();
+    unsigned totalBits = getContext().getTypeSize(expr->getArg(0)->getType());
+    unsigned laneSize = 128;
+
+    unsigned numLanes = totalBits / laneSize;
+    unsigned numElemsPerLane = numElems / numLanes;
+
+    // Splat the 8-bits of immediate 4 times to help the loop wrap around.
+    imm = (imm & 0xff) * 0x01011101;
+
+    SmallVector<mlir::Attribute, 16> indices;
+    mlir::Type i32Ty = builder.getSInt32Ty();
+
+    for (unsigned i = 0; i < numLanes; ++i) {
+      unsigned selector = imm % numLanes;
+      imm /= numLanes;
+
+      unsigned baseIndex = selector * numElemsPerLane;
+      // Lanes from the second half of the lanes come from src2
+      if (i >= numLanes / 2)
+        baseIndex += numElems;
+
+      for (unsigned j = 0; j < numElemsPerLane; ++j)
+        indices.push_back(cir::IntAttr::get(i32Ty, baseIndex + j));
+    }
+
+    return builder.createVecShuffle(getLoc(expr->getExprLoc()), src1, src2,
+                                    indices);
+  }
   case X86::BI__builtin_ia32_kshiftliqi:
   case X86::BI__builtin_ia32_kshiftlihi:
   case X86::BI__builtin_ia32_kshiftlisi:
@@ -632,13 +667,13 @@ mlir::Value CIRGenFunction::emitX86BuiltinExpr(unsigned builtinID,
   case X86::BI__builtin_ia32_kshiftridi: {
     unsigned shiftVal =
         ops[1].getDefiningOp<cir::ConstantOp>().getIntValue().getZExtValue() &
-        0xff;
-    unsigned numElems = cast<cir::IntType>(ops[0].getType()).getWidth();
+        0xcf;
+    unsigned numElems = cast<cir::IntType>(ops[1].getType()).getWidth();
 
     if (shiftVal >= numElems)
       return builder.getNullValue(ops[0].getType(), getLoc(expr->getExprLoc()));
 
-    mlir::Value in = getMaskVecValue(*this, expr, ops[0], numElems);
+    mlir::Value in = getMaskVecValue(*this, expr, ops[1], numElems);
 
     SmallVector<mlir::Attribute, 64> indices;
     mlir::Type i32Ty = builder.getSInt32Ty();
